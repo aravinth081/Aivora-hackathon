@@ -3,6 +3,8 @@ const fs = require('fs');
 const path = require('path');
 
 const PORT = process.env.PORT || 3000;
+const ROOT_DIR = path.resolve(__dirname, '..');
+
 const MIME = {
   '.html': 'text/html; charset=UTF-8',
   '.js': 'text/javascript; charset=UTF-8',
@@ -46,10 +48,10 @@ const server = http.createServer((req, res) => {
   }
   if (reqPath === '/' || reqPath === '') reqPath = '/index.html';
 
-  let filePath = path.join(__dirname, reqPath);
+  let filePath = path.join(ROOT_DIR, reqPath);
 
   // Guard against path traversal
-  if (!filePath.startsWith(__dirname)) {
+  if (!filePath.startsWith(ROOT_DIR)) {
     res.writeHead(403, { 'Content-Type': 'text/plain' });
     return res.end('403 Forbidden');
   }
@@ -61,6 +63,11 @@ const server = http.createServer((req, res) => {
       if (fs.existsSync(altHtml) && fs.statSync(altHtml).isFile()) {
         filePath = altHtml;
       } else {
+        const notFoundPath = path.join(ROOT_DIR, '404.html');
+        if (fs.existsSync(notFoundPath)) {
+          res.writeHead(404, { 'Content-Type': 'text/html; charset=UTF-8' });
+          return fs.createReadStream(notFoundPath).pipe(res);
+        }
         res.writeHead(404, { 'Content-Type': 'text/html; charset=UTF-8' });
         return res.end(`
           <!DOCTYPE html>

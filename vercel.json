@@ -1,12 +1,11 @@
 {
-  "version": 2,
+  "$schema": "https://openapi.vercel.sh/vercel.json",
   "cleanUrls": true,
   "trailingSlash": false,
-  "routes": [
-    { "src": "/admin", "dest": "/control.html" },
-    { "src": "/control", "dest": "/control.html" },
-    { "src": "/winner", "dest": "/winner.html" },
-    { "src": "/judges", "dest": "/judges.html" },
-    { "src": "/(.*)", "dest": "/$1" }
+  "rewrites": [
+    { "source": "/admin", "destination": "/control.html" },
+    { "source": "/control", "destination": "/control.html" },
+    { "source": "/winner", "destination": "/winner.html" },
+    { "source": "/judges", "destination": "/judges.html" }
   ]
 }
