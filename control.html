@@ -2427,8 +2427,8 @@
 
     /* ═══ SUPABASE & DATA SYNC ═══ */
     async function loadData() {
-      // 1. Instantly restore all 4 templates from IndexedDB or LocalStorage so they NEVER disappear on logout/reload
-      for (const tKey of ['participation', 'winner1', 'winner2', 'winner3']) {
+      // 1. Instantly restore all 5 templates from IndexedDB or LocalStorage so they NEVER disappear on logout/reload
+      for (const tKey of ['participation', 'winner1', 'winner2', 'winner3', 'judges']) {
         var isCleared = false;
         try { isCleared = (localStorage.getItem('tpl_cleared_' + tKey) === 'true'); } catch(e) {}
         if (!isCleared) {
@@ -2537,7 +2537,7 @@
 
         if (AivoraSB) {
           try {
-            // Fetch custom templates from Supabase
+            // Fetch custom templates from Firebase Firestore (Cloudinary URLs)
             const sbTemplates = await AivoraSB.getCustomTemplates();
             for (const tKey of ['participation', 'winner1', 'winner2', 'winner3', 'judges']) {
               var isClr = false;
@@ -2546,6 +2546,22 @@
                 templates[tKey] = sbTemplates[tKey];
                 try { await TplDB.set(tKey, sbTemplates[tKey]); } catch(e) {}
                 try { localStorage.setItem('tpl_' + tKey, sbTemplates[tKey]); } catch(e) {}
+              } else if (!isClr && templates[tKey] && typeof templates[tKey] === 'string' && templates[tKey].startsWith('data:')) {
+                // Auto-sync Desktop local template to Cloudinary + Firestore so Mobile sees it immediately!
+                (async (k, dUrl) => {
+                  try {
+                    const cUrl = await AivoraSB.saveCustomTemplate(k, dUrl);
+                    if (cUrl && cUrl.startsWith('http')) {
+                      templates[k] = cUrl;
+                      try { await TplDB.set(k, cUrl); } catch(e) {}
+                      try { localStorage.setItem('tpl_' + k, cUrl); } catch(e) {}
+                      restoreTemplateUI();
+                      console.log('Successfully synced desktop template to Cloud for Mobile:', k);
+                    }
+                  } catch(err) {
+                    console.warn('Auto-sync notice for ' + k + ':', err);
+                  }
+                })(tKey, templates[tKey]);
               }
             }
 
@@ -4787,19 +4803,14 @@
       const fileName = file.name;
 
       const badge = document.getElementById('tpl-badge-' + key);
-      if (badge) {
-        badge.textContent = 'SAVING…';
-        badge.className = 'tpl-badge default';
-      }
-
       const info = document.getElementById('tpl-info-' + key);
-      if (info) {
-        info.innerHTML = '<span class="dot" style="background:#F59E0B;"></span> Saving ' + fileName + ' (' + sizeKB + ' KB)…';
-        info.style.display = 'flex';
-      }
+      const dropEl = document.getElementById('tpl-drop-' + key);
+      const prevEl = document.getElementById('tpl-preview-' + key);
+      const imgEl = document.getElementById('tpl-img-' + key);
+      const posEl = document.getElementById('tpl-namepos-' + key);
 
       try {
-        // 1. Read file locally first for INSTANT preview (0ms wait)
+        // 1. Instant local preview
         const reader = new FileReader();
         const localDataUrl = await new Promise((resolve, reject) => {
           reader.onload = evt => resolve(evt.target.result);
@@ -4807,68 +4818,99 @@
           reader.readAsDataURL(file);
         });
 
-        // Set in-memory template immediately
         templates[key] = localDataUrl;
-
-        // Show preview immediately, hide drop zone
-        const dropEl = document.getElementById('tpl-drop-' + key);
         if (dropEl) dropEl.style.display = 'none';
-        const prevEl = document.getElementById('tpl-preview-' + key);
         if (prevEl) prevEl.style.display = 'block';
-        const imgEl = document.getElementById('tpl-img-' + key);
         if (imgEl) imgEl.src = localDataUrl;
-        const posEl = document.getElementById('tpl-namepos-' + key);
         if (posEl) posEl.style.display = 'block';
 
-        // 2. Immediately save to IndexedDB & LocalStorage so reload or logout NEVER loses it!
         await TplDB.set(key, localDataUrl);
         try { localStorage.setItem('tpl_' + key, localDataUrl); } catch (e) { }
+        try { localStorage.removeItem('tpl_cleared_' + key); } catch(e) {}
 
-        // 3. Try Supabase Storage upload in background
-        let finalUrl = localDataUrl;
-        try {
-          finalUrl = await uploadImageToSupabase(file, key);
-          templates[key] = finalUrl;
-          await TplDB.set(key, finalUrl);
-          try { localStorage.setItem('tpl_' + key, finalUrl); } catch (e) { }
-        } catch (cloudErr) {
-          console.warn('Supabase Storage upload skipped or timed out, persisting locally and to Supabase DB:', cloudErr);
+        if (badge) {
+          badge.textContent = 'UPLOADING TO CLOUD…';
+          badge.className = 'tpl-badge default';
         }
 
-        // 4. Save to Supabase custom_templates
-        await saveTemplateToStorage(key, finalUrl);
+        if (info) {
+          info.innerHTML = '<span class="dot" style="background:#00D9FF;animation:pulse 1s infinite;"></span> Syncing ' + fileName + ' (' + sizeKB + ' KB) to Cloud (Cloudinary & Firebase)...';
+          info.style.display = 'flex';
+        }
 
-        const isCloud = finalUrl.startsWith('http');
+        // 2. Upload file directly to Cloudinary
+        let cloudUrl = null;
+        if (window.AivoraCloudinary && typeof window.AivoraCloudinary.upload === 'function') {
+          cloudUrl = await window.AivoraCloudinary.upload(file, 'devloper');
+        } else if (AivoraSB && typeof AivoraSB.uploadToCloudinary === 'function') {
+          cloudUrl = await AivoraSB.uploadToCloudinary(file, 'devloper');
+        } else {
+          throw new Error('Cloud storage handler not initialized');
+        }
+
+        if (!cloudUrl || !cloudUrl.startsWith('http')) {
+          throw new Error('Upload returned invalid cloud URL: ' + cloudUrl);
+        }
+
+        // 3. Save Cloudinary URL to Firestore & local storage
+        templates[key] = cloudUrl;
+        await TplDB.set(key, cloudUrl);
+        try { localStorage.setItem('tpl_' + key, cloudUrl); } catch(e) {}
+
+        if (AivoraSB && typeof AivoraSB.saveCustomTemplate === 'function') {
+          await AivoraSB.saveCustomTemplate(key, cloudUrl);
+        }
+
+        // Also save positions to Firestore
+        if (AivoraSB && typeof AivoraSB.saveTemplatePositions === 'function') {
+          try {
+            await AivoraSB.saveTemplatePositions({
+              participation: { nameX: namePositionsX.participation, nameY: namePositionsY.participation },
+              winner1: { nameX: namePositionsX.winner1, nameY: namePositionsY.winner1 },
+              winner2: { nameX: namePositionsX.winner2, nameY: namePositionsY.winner2 },
+              winner3: { nameX: namePositionsX.winner3, nameY: namePositionsY.winner3 },
+              judges: { nameX: namePositionsX.judges, nameY: namePositionsY.judges }
+            });
+          } catch(posErr) {}
+        }
+
         if (badge) {
-          badge.textContent = isCloud ? 'UPLOADED' : 'SAVED';
+          badge.textContent = 'UPLOADED (CLOUD)';
           badge.className = 'tpl-badge uploaded';
         }
 
         if (info) {
-          info.innerHTML = '<span class="dot"></span> ' + fileName + ' · ' + sizeKB + ' KB · ' + (isCloud ? '☁ Cloud' : '💾 Persistent Storage');
+          info.innerHTML = '<span class="dot" style="background:#22C55E;"></span> ' + fileName + ' · ' + sizeKB + ' KB · ☁ Synced to Cloud (Mobile & Desktop)';
           info.style.display = 'flex';
         }
 
         Swal.fire({
-          title: 'Template Saved!',
-          text: 'Participant certificate template saved permanently. It will remain saved across logouts, tab closures, and page refreshes until you click Clear Template.',
+          title: 'Template Synced to Cloud!',
+          html: 'Template uploaded successfully to Cloudinary & Firebase.<br><br><b>Now accessible on Mobile, Desktop, and all attendee portals!</b>',
           icon: 'success',
           background: '#0a1628',
           color: '#fff',
-          timer: 2500,
+          timer: 3000,
           showConfirmButton: false
         });
 
       } catch (err) {
-        console.error('Template save error:', err);
+        console.error('Template cloud sync error:', err);
         if (badge) {
-          badge.textContent = 'SAVED';
-          badge.className = 'tpl-badge uploaded';
+          badge.textContent = 'LOCAL ONLY';
+          badge.className = 'tpl-badge default';
         }
         if (info) {
-          info.innerHTML = '<span class="dot"></span> ' + fileName + ' · ' + sizeKB + ' KB · 💾 Persistent Storage';
+          info.innerHTML = '<span class="dot" style="background:#EF4444;"></span> ' + fileName + ' · ⚠ Local only (Cloud sync error: ' + (err.message || 'Check network') + ')';
           info.style.display = 'flex';
         }
+        Swal.fire({
+          title: 'Cloud Sync Failed',
+          text: 'Saved locally on this device, but failed to sync to cloud: ' + (err.message || 'Check connection') + '. Click "Save All Templates" to retry syncing to mobile.',
+          icon: 'warning',
+          background: '#0a1628',
+          color: '#fff'
+        });
       }
     }
 
@@ -4966,42 +5008,67 @@
     }
 
     async function saveTemplateToStorage(key, urlOrDataUrl) {
-      templates[key] = urlOrDataUrl || '';
+      let finalUrl = urlOrDataUrl || '';
 
-      // 1. Sync IndexedDB (Primary indestructible local storage)
-      if (urlOrDataUrl) {
+      // Auto-upload dataURLs to Cloudinary so Mobile devices can access it via HTTPS
+      if (typeof finalUrl === 'string' && finalUrl.startsWith('data:')) {
+        try {
+          if (window.AivoraCloudinary && typeof window.AivoraCloudinary.upload === 'function') {
+            finalUrl = await window.AivoraCloudinary.upload(finalUrl, 'devloper');
+          } else if (AivoraSB && typeof AivoraSB.uploadToCloudinary === 'function') {
+            finalUrl = await AivoraSB.uploadToCloudinary(finalUrl, 'devloper');
+          }
+        } catch(e) {
+          console.warn('saveTemplateToStorage Cloudinary upload failed:', e);
+        }
+      }
+
+      templates[key] = finalUrl;
+
+      // 1. Sync IndexedDB
+      if (finalUrl) {
         try { localStorage.removeItem('tpl_cleared_' + key); } catch(e) {}
-        await TplDB.set(key, urlOrDataUrl);
+        await TplDB.set(key, finalUrl);
       } else {
         await TplDB.delete(key);
       }
 
-      // 2. Sync localStorage (fallback)
+      // 2. Sync localStorage
       try {
-        if (urlOrDataUrl) {
-          localStorage.setItem('tpl_' + key, urlOrDataUrl);
+        if (finalUrl) {
+          localStorage.setItem('tpl_' + key, finalUrl);
         } else {
           localStorage.removeItem('tpl_' + key);
         }
       } catch (e) { }
 
-      // 3. Sync Supabase
+      // 3. Sync Firebase Firestore
       if (AivoraSB) {
         try {
-          if (urlOrDataUrl) {
-            await AivoraSB.saveCustomTemplate(key, urlOrDataUrl);
+          if (finalUrl) {
+            await AivoraSB.saveCustomTemplate(key, finalUrl);
           } else {
             await AivoraSB.deleteCustomTemplate(key);
           }
         } catch (e) {
-          console.warn('Supabase template sync failed:', e);
+          console.warn('Firebase template sync failed:', e);
         }
       }
+      return finalUrl;
     }
 
     async function saveAllTemplates() {
       const keys = ['participation', 'winner1', 'winner2', 'winner3', 'judges'];
       let savedCount = 0;
+
+      Swal.fire({
+        title: 'Syncing Templates to Cloud...',
+        html: 'Uploading templates to Cloudinary & Firebase so they appear on <b>Mobile devices</b>...',
+        allowOutsideClick: false,
+        didOpen: () => { Swal.showLoading(); },
+        background: '#0a1628',
+        color: '#fff'
+      });
 
       try {
         for (const key of keys) {
@@ -5015,13 +5082,40 @@
           }
 
           if (templates[key]) {
-            await saveTemplateToStorage(key, templates[key]);
+            let finalUrl = templates[key];
+
+            // If template is still a local dataURL (uploaded on desktop), upload to Cloudinary so Mobile can see it!
+            if (typeof finalUrl === 'string' && finalUrl.startsWith('data:')) {
+              try {
+                if (window.AivoraCloudinary && typeof window.AivoraCloudinary.upload === 'function') {
+                  finalUrl = await window.AivoraCloudinary.upload(finalUrl, 'devloper');
+                } else if (AivoraSB && typeof AivoraSB.uploadToCloudinary === 'function') {
+                  finalUrl = await AivoraSB.uploadToCloudinary(finalUrl, 'devloper');
+                }
+                templates[key] = finalUrl;
+                await TplDB.set(key, finalUrl);
+                try { localStorage.setItem('tpl_' + key, finalUrl); } catch(e) {}
+              } catch (cloudErr) {
+                console.warn('Cloud upload failed for key ' + key + ':', cloudErr);
+              }
+            }
+
+            // Save to Firestore custom_templates
+            if (AivoraSB && typeof AivoraSB.saveCustomTemplate === 'function') {
+              await AivoraSB.saveCustomTemplate(key, finalUrl);
+            }
+
             savedCount++;
 
             const badge = document.getElementById('tpl-badge-' + key);
             if (badge) {
-              badge.textContent = templates[key].startsWith('http') ? 'UPLOADED' : 'SAVED';
-              badge.className = 'tpl-badge uploaded';
+              badge.textContent = finalUrl.startsWith('http') ? 'UPLOADED (CLOUD)' : 'LOCAL';
+              badge.className = finalUrl.startsWith('http') ? 'tpl-badge uploaded' : 'tpl-badge default';
+            }
+            const info = document.getElementById('tpl-info-' + key);
+            if (info) {
+              info.innerHTML = '<span class="dot" style="background:#22C55E;"></span> ' + (finalUrl.startsWith('http') ? '☁ Synced to Cloud (Mobile & Desktop)' : '💾 Local Storage');
+              info.style.display = 'flex';
             }
           }
 
@@ -5035,10 +5129,10 @@
           } catch(e) {}
         }
 
-        // Save all X and Y positions to Supabase permanently (synced to all mobile & desktop users)
-        if (window.AivoraSupabase) {
+        // Save all X and Y positions to Firestore permanently (synced to all mobile & desktop users)
+        if (AivoraSB && typeof AivoraSB.saveTemplatePositions === 'function') {
           try {
-            await window.AivoraSupabase.saveTemplatePositions({
+            await AivoraSB.saveTemplatePositions({
               participation: { nameX: namePositionsX.participation, nameY: namePositionsY.participation },
               winner1: { nameX: namePositionsX.winner1, nameY: namePositionsY.winner1 },
               winner2: { nameX: namePositionsX.winner2, nameY: namePositionsY.winner2 },
@@ -5046,19 +5140,27 @@
               judges: { nameX: namePositionsX.judges, nameY: namePositionsY.judges }
             });
           } catch(e) {
-            console.warn('Failed saving template positions to Supabase:', e);
+            console.warn('Failed saving template positions to Firestore:', e);
           }
         }
 
         Swal.fire({
-          title: 'Templates Saved!',
-          text: `All 5 certificate templates and name alignments saved permanently. They are synced for both Mobile and Desktop views across all devices.`,
+          title: 'Synced Across All Devices!',
+          html: `All certificate templates and coordinate alignments are saved to Cloudinary & Firebase.<br><br><b>They will now appear automatically on Mobile Admin and Desktop Admin!</b>`,
           icon: 'success',
+          background: '#0a1628',
+          color: '#fff',
+          confirmButtonColor: '#00D9FF'
+        });
+      } catch (e) {
+        console.error('Failed saving templates:', e);
+        Swal.fire({
+          title: 'Sync Error',
+          text: 'Error saving templates: ' + (e.message || 'Check network connection'),
+          icon: 'error',
           background: '#0a1628',
           color: '#fff'
         });
-      } catch (e) {
-        Swal.fire({ title: 'Save Failed', text: e.message, icon: 'error', background: '#0a1628', color: '#fff' });
       }
     }
 

@@ -146,15 +146,49 @@
     return String(str).trim().toLowerCase().replace(/[\/\\#\?]/g, '_');
   }
 
+  function dataURLtoBlob(dataUrl) {
+    if (!dataUrl || typeof dataUrl !== 'string') return dataUrl;
+    if (!dataUrl.startsWith('data:')) return dataUrl;
+    try {
+      const parts = dataUrl.split(',');
+      const mimeMatch = parts[0].match(/:(.*?);/);
+      const mime = mimeMatch ? mimeMatch[1] : 'image/png';
+      const bstr = atob(parts[1]);
+      let n = bstr.length;
+      const u8arr = new Uint8Array(n);
+      while (n--) {
+        u8arr[n] = bstr.charCodeAt(n);
+      }
+      return new Blob([u8arr], { type: mime });
+    } catch (e) {
+      console.warn('dataURLtoBlob conversion error:', e);
+      return dataUrl;
+    }
+  }
+
   // ── CLOUDINARY UPLOAD (UNSIGNED PRESET: aivora) ──
   async function uploadToCloudinary(fileOrDataUrl, folderName) {
+    if (!fileOrDataUrl) throw new Error('No file provided for upload.');
+
+    // If it's already an active HTTPS Cloudinary URL, return as-is
+    if (typeof fileOrDataUrl === 'string' && (fileOrDataUrl.startsWith('http://') || fileOrDataUrl.startsWith('https://'))) {
+      return fileOrDataUrl;
+    }
+
     const cfg = getCloudinaryConfig();
     const cloudName = cfg.cloudName || 'eo67rite';
     const uploadPreset = cfg.uploadPreset || 'aivora';
     const targetFolder = folderName || cfg.folder || 'devloper';
 
     const formData = new FormData();
-    formData.append('file', fileOrDataUrl);
+    if (typeof fileOrDataUrl === 'string' && fileOrDataUrl.startsWith('data:')) {
+      const blob = dataURLtoBlob(fileOrDataUrl);
+      const ext = (blob.type && blob.type.split('/')[1]) || 'png';
+      formData.append('file', blob, `template_${Date.now()}.${ext}`);
+    } else {
+      formData.append('file', fileOrDataUrl);
+    }
+
     formData.append('upload_preset', uploadPreset);
     if (targetFolder) {
       formData.append('folder', targetFolder);
@@ -736,18 +770,32 @@
 
   async function saveCustomTemplate(key, url) {
     if (!key || !url) return;
+    let finalUrl = url;
+
+    // CRITICAL: Auto-upload dataURLs to Cloudinary so Firestore never receives >1MB payloads
+    if (typeof url === 'string' && url.startsWith('data:')) {
+      try {
+        finalUrl = await uploadToCloudinary(url, 'devloper');
+      } catch (err) {
+        console.error('saveCustomTemplate auto-upload to Cloudinary failed:', err);
+        throw err;
+      }
+    }
+
     const db = getDb();
     if (db && isLive()) {
       try {
         await db.collection('custom_templates').doc(key).set({
           key,
-          url,
+          url: finalUrl,
           updatedAt: new Date().toISOString()
         }, { merge: true });
       } catch (e) {
         console.warn('Firebase saveCustomTemplate error:', e);
+        throw e;
       }
     }
+    return finalUrl;
   }
 
   async function deleteCustomTemplate(key) {
@@ -831,11 +879,22 @@
 
   async function saveSignatures(signatures) {
     if (!signatures) return;
+    const cleanSigs = Object.assign({}, signatures);
+    for (const k of ['organizer', 'director']) {
+      if (cleanSigs[k] && typeof cleanSigs[k] === 'string' && cleanSigs[k].startsWith('data:')) {
+        try {
+          cleanSigs[k] = await uploadToCloudinary(cleanSigs[k], 'devloper');
+        } catch (e) {
+          console.warn('Signature upload error for ' + k + ':', e);
+        }
+      }
+    }
+
     const db = getDb();
     if (db && isLive()) {
       try {
         await db.collection('admin_config').doc('signatures').set({
-          data: signatures,
+          data: cleanSigs,
           updatedAt: new Date().toISOString()
         }, { merge: true });
       } catch (e) {
