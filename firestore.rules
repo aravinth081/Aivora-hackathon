@@ -1,0 +1,10 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // AIVORA 2K26 — Hackathon Credential Platform
+    // Allows public read/write for event participants, credentials, and templates
+    match /{document=**} {
+      allow read, write: if true;
+    }
+  }
+}

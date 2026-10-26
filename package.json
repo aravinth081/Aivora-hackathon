@@ -1,0 +1,22 @@
+{
+  "name": "innovation-hacks",
+  "version": "2.0.0",
+  "description": "INNOVATION HACKS — BUILD • INNOVATE • IMPACT | Official Technology Platform & Hackathon Ecosystem",
+  "type": "module",
+  "scripts": {
+    "dev": "npx -y serve . -l 3000",
+    "start": "npx -y serve . -l 3000",
+    "serve": "npx -y serve ."
+  },
+  "keywords": [
+    "innovation-hacks",
+    "hackathon",
+    "aivora",
+    "ai",
+    "technology",
+    "certificates",
+    "innovation"
+  ],
+  "author": "Innovation Hacks",
+  "license": "ISC"
+}
